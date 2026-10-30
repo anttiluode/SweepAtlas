@@ -153,6 +153,7 @@ def run_video(args, path=None):
     saved_once = False
     last_process_index = -1
     next_frame_at = time.monotonic() + 1. / fps
+    last_overlay = 0.
 
     def mouse(event, x, y, flags, param):
         nonlocal scrubbing, pending_seek, paused
@@ -186,7 +187,7 @@ def run_video(args, path=None):
 
     def jump(target):
         nonlocal frame, index, paused, force_relocalize, next_frame_at
-        nonlocal message, message_until
+        nonlocal message, message_until, last_process_index
         result, landed = read_at(cap, target, total)
         if result is None:
             message, message_until = "Seek failed; unsupported codec or frame", time.monotonic() + 4
@@ -194,6 +195,7 @@ def run_video(args, path=None):
         frame, index = result, landed
         paused = True
         force_relocalize = True
+        last_process_index = -1
         next_frame_at = time.monotonic() + 1. / fps
         message = "Preview only: Space resumes stitching; R starts a fresh atlas here"
         message_until = time.monotonic() + 6
@@ -210,10 +212,12 @@ def run_video(args, path=None):
                     jump(target)
 
             if not paused and now >= next_frame_at:
-                # The frame currently displayed has not been stitched yet:
-                # process before advancing, but never process the same frame
-                # twice when the user pauses/rewinds.
-                if index != last_process_index:
+                # Stitch at the configured sample frequency, while playing
+                # source frames at their normal video rate. A seek causes a
+                # fresh relocalization attempt without stitching while paused.
+                stride = max(1, round(fps / args.process_hz))
+                if (last_process_index < 0 or index - last_process_index >= stride
+                        or force_relocalize):
                     try:
                         atlas.process(frame, relocalize=force_relocalize)
                     except (cv2.error, ValueError) as exc:
@@ -228,14 +232,16 @@ def run_video(args, path=None):
                         index = max(0, min(total - 1, int(round(reported)) - 1))
                     else:
                         index = min(index + 1, total - 1)
-                    next_frame_at = time.monotonic() + max(1. / fps, 1. / args.process_hz)
+                    next_frame_at = time.monotonic() + 1. / fps
                 else:
                     paused = True
                     message, message_until = "End of video; scrub back, replay, or save", time.monotonic() + 8
 
-            visible = message if time.monotonic() < message_until else ""
-            display = video_display(frame, atlas, paused, fps, source.name, index, total, visible)
-            cv2.imshow(WINDOW, display)
+            if time.monotonic() - last_overlay >= .08:
+                visible = message if time.monotonic() < message_until else ""
+                display = video_display(frame, atlas, paused, fps, source.name, index, total, visible)
+                cv2.imshow(WINDOW, display)
+                last_overlay = time.monotonic()
             key = cv2.waitKeyEx(15)
             if key in (ord("q"), ord("Q"), 27):
                 if not args.no_autosave and not saved_once:
@@ -269,18 +275,19 @@ def run_video(args, path=None):
             elif key in (ord("o"), ord("O")):
                 chosen = choose_video()
                 if chosen is not None:
+                    candidate_cap = None
                     try:
-                        new_cap, new_fps, new_total = open_capture(chosen)
-                        new_frame, new_index = read_at(new_cap, 0, new_total)
+                        candidate_cap, new_fps, new_total = open_capture(chosen)
+                        new_frame, new_index = read_at(candidate_cap, 0, new_total)
                         if new_frame is None:
                             raise OSError("Could not decode the first frame")
                     except OSError as exc:
-                        if "new_cap" in locals():
-                            new_cap.release()
+                        if candidate_cap is not None:
+                            candidate_cap.release()
                         message, message_until = str(exc), time.monotonic() + 7
                     else:
                         cap.release()
-                        cap, fps, total = new_cap, new_fps, new_total
+                        cap, fps, total = candidate_cap, new_fps, new_total
                         source, frame, index = chosen, new_frame, new_index
                         atlas = fresh_atlas(atlas.predictor)
                         saved_once, last_process_index, force_relocalize = False, -1, False
