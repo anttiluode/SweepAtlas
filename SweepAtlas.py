@@ -422,7 +422,7 @@ def build_display(frame: np.ndarray, atlas: SweepAtlas, paused: bool, running: b
     label(image, atlas.last_status[:118], (14, 529), (115, 192, 235), .50)
     if message:
         label(image, message[:95], (left_w + 12, 507), (110, 240, 135), .52)
-    label(image, f'{source_fps:.1f} camera fps  |  S save  R reset  SPACE pause  L relocalize  P predictor  Q quit',
+    label(image, f'{source_fps:.1f} camera fps  |  O open video  S save  R reset  SPACE pause  L relocalize  P predictor  Q quit',
           (left_w + 12, 529), (195, 200, 207), .37)
     return image
 
@@ -455,6 +455,8 @@ def demo_self_test() -> None:
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description='Real webcam sweep-to-image atlas: OpenCV + geometric verification')
+    ap.add_argument('--video', type=Path, default=None,
+                    help='Open a video with a scrubbable timeline instead of the webcam')
     ap.add_argument('--camera', type=int, default=0, help='Webcam index (try 1 for a second camera)')
     ap.add_argument('--width', type=int, default=960, help='Requested camera frame width')
     ap.add_argument('--height', type=int, default=540, help='Requested camera frame height')
@@ -482,9 +484,12 @@ def main(argv=None):
     if args.self_test:
         demo_self_test()
         return 0
+    if args.video is not None:
+        from SweepAtlasVideo import run_video
+        return run_video(args, args.video)
     print('SweepAtlas — REAL webcam mosaic (no synthetic tiles, no hallucinated pixels)')
     print('Best results: textured wall/art/document; move slowly with good overlap and steady lighting.')
-    print('Keys: S save, R reset, SPACE pause, L relocalize, P toggle predictor, Q/Esc save+quit.')
+    print('Keys: O open video, S save, R reset, SPACE pause, L relocalize, P predictor, Q/Esc save+quit.')
     cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW if sys.platform == 'win32' else cv2.CAP_ANY)
     if not cap.isOpened() and sys.platform == 'win32':
         cap.release()
@@ -574,6 +579,11 @@ def main(argv=None):
             elif key in (ord('p'), ord('P')):
                 atlas.predictor = not atlas.predictor
                 message, message_until = f'Pose predictor: {atlas.predictor}', now+3
+            elif key in (ord('o'), ord('O')):
+                from SweepAtlasVideo import run_video
+                cap.release()
+                cv2.destroyAllWindows()
+                return run_video(args)
             try:
                 if cv2.getWindowProperty(title, cv2.WND_PROP_VISIBLE) < 1:
                     if not args.no_autosave and not saved_once:
