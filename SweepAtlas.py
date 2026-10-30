@@ -22,6 +22,8 @@ import time
 import cv2
 import numpy as np
 
+from SweepAtlasAdjust import ImageAdjustments
+
 
 def transform_points(h: np.ndarray, pts: np.ndarray) -> np.ndarray:
     return cv2.perspectiveTransform(np.asarray(pts, np.float32).reshape(-1, 1, 2),
@@ -130,7 +132,8 @@ class AtlasTiles:
         return True
 
     def preview(self, width: int, height: int, camera_pose: np.ndarray | None,
-                frame_size: tuple[int, int] | None, keyframes: list[Keyframe]) -> np.ndarray:
+                frame_size: tuple[int, int] | None, keyframes: list[Keyframe],
+                adjustments: ImageAdjustments | None = None) -> np.ndarray:
         view = np.full((height, width, 3), (29, 31, 35), np.uint8)
         if self.bounds is None:
             return view
@@ -140,6 +143,8 @@ class AtlasTiles:
         ox = (width - extent_w * scale) * .5
         oy = (height - extent_h * scale) * .5
         ts = self.ts
+        coverage = (np.zeros((height, width), np.uint8)
+                    if adjustments is not None and adjustments.active else None)
         for (tx, ty), (rgb, weights) in self.tiles.items():
             u0 = int(round((tx * ts - x0) * scale + ox))
             v0 = int(round((ty * ts - y0) * scale + oy))
@@ -157,6 +162,11 @@ class AtlasTiles:
             ry, rx = slice(t-v0, b-v0), slice(l-u0, r-u0)
             dest = view[t:b, l:r]
             np.copyto(dest, resized[ry, rx], where=mask[ry, rx, None].astype(bool))
+            if coverage is not None:
+                coverage[t:b, l:r] |= mask[ry, rx]
+        if coverage is not None:
+            view = adjustments.apply(view, mask=coverage)
+        # Add map overlays only after image adjustment, so they stay legible.
         for key in keyframes[-120:]:
             px = int((key.center[0] - x0) * scale + ox)
             py = int((key.center[1] - y0) * scale + oy)
@@ -169,7 +179,8 @@ class AtlasTiles:
             cv2.polylines(view, [quad], True, (60, 220, 130), 2, cv2.LINE_AA)
         return view
 
-    def save(self, path: Path, max_megapixels: float = 100.0) -> tuple[int, int, float]:
+    def save(self, path: Path, max_megapixels: float = 100.0,
+             adjustments: ImageAdjustments | None = None) -> tuple[int, int, float]:
         if self.bounds is None:
             raise RuntimeError('No mosaic content yet')
         x0, y0, x1, y1 = self.bounds
@@ -197,6 +208,8 @@ class AtlasTiles:
             # scale reductions; the tile-grid partition remains deterministic.
             out[t:b, l:r, :3] = patch
             out[t:b, l:r, 3] = alpha
+        if adjustments is not None:
+            adjustments.apply_rgba_inplace(out)
         path.parent.mkdir(parents=True, exist_ok=True)
         ok = cv2.imwrite(str(path), out, [cv2.IMWRITE_PNG_COMPRESSION, 3])
         if not ok:
@@ -404,11 +417,15 @@ def label(image: np.ndarray, text: str, position: tuple[int, int], color=(238,23
 
 
 def build_display(frame: np.ndarray, atlas: SweepAtlas, paused: bool, running: bool,
-                  source_fps: float, message: str = ''):
+                  source_fps: float, message: str = '',
+                  adjustments: ImageAdjustments | None = None):
     left_w, left_h = 760, 440
     right_w, right_h = 760, 440
     left = cv2.resize(frame, (left_w, left_h), interpolation=cv2.INTER_AREA)
-    right = atlas.tiles.preview(right_w, right_h, atlas.pose, atlas.size, atlas.keyframes)
+    if adjustments is not None:
+        left = adjustments.apply(left)
+    right = atlas.tiles.preview(right_w, right_h, atlas.pose, atlas.size,
+                                atlas.keyframes, adjustments=adjustments)
     image = np.full((550, left_w + right_w, 3), (25, 26, 30), np.uint8)
     image[45:485, :left_w] = left
     image[45:485, left_w:] = right
@@ -422,7 +439,7 @@ def build_display(frame: np.ndarray, atlas: SweepAtlas, paused: bool, running: b
     label(image, atlas.last_status[:118], (14, 529), (115, 192, 235), .50)
     if message:
         label(image, message[:95], (left_w + 12, 507), (110, 240, 135), .52)
-    label(image, f'{source_fps:.1f} camera fps  |  O open video  S save  R reset  SPACE pause  L relocalize  P predictor  Q quit',
+    label(image, f'{source_fps:.1f} fps  |  O video  S save  R atlas  C filters  SPACE pause  L relocalize  P predictor  Q quit',
           (left_w + 12, 529), (195, 200, 207), .37)
     return image
 
@@ -489,7 +506,7 @@ def main(argv=None):
         return run_video(args, args.video)
     print('SweepAtlas — REAL webcam mosaic (no synthetic tiles, no hallucinated pixels)')
     print('Best results: textured wall/art/document; move slowly with good overlap and steady lighting.')
-    print('Keys: O open video, S save, R reset, SPACE pause, L relocalize, P predictor, Q/Esc save+quit.')
+    print('Keys: O video, S save, R atlas, C reset image filters, SPACE pause, L relocalize, P predictor, Q quit.')
     cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW if sys.platform == 'win32' else cv2.CAP_ANY)
     if not cap.isOpened() and sys.platform == 'win32':
         cap.release()
@@ -505,6 +522,8 @@ def main(argv=None):
     title = 'SweepAtlas  |  Real webcam stitching'
     cv2.namedWindow(title, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(title, 1520, 550)
+    adjustments = ImageAdjustments()
+    adjustments.attach(title)
     paused = False
     relocalize = False
     last_process = 0.
@@ -524,7 +543,8 @@ def main(argv=None):
         filename = args.out / f'SweepAtlas_{datetime.now():%Y%m%d_%H%M%S}.png'
         print(f'Saving {filename} ...', flush=True)
         try:
-            width, height, factor = atlas.tiles.save(filename, args.max_export_mp)
+            adjustments.read(title)
+            width, height, factor = atlas.tiles.save(filename, args.max_export_mp, adjustments=adjustments)
             print(f'SAVED {filename.resolve()}  ({width}x{height}, export scale {factor:.3f})', flush=True)
             message, message_until = f'Saved {filename.name} ({width}x{height})', time.monotonic()+8
             saved_once = True
@@ -556,7 +576,9 @@ def main(argv=None):
                 last_process = now
             visible_message = message if now < message_until else ''
             if now - last_overlay >= .08:
-                display = build_display(frame, atlas, paused, atlas.lost==0, fps, visible_message)
+                adjustments.read(title)
+                display = build_display(frame, atlas, paused, atlas.lost==0, fps,
+                                        visible_message, adjustments=adjustments)
                 cv2.imshow(title, display)
                 last_overlay = now
             key = cv2.waitKey(1) & 0xff
@@ -571,6 +593,9 @@ def main(argv=None):
                                    args.tile_size, args.max_tiles, predictor=atlas.predictor)
                 saved_once = False
                 message, message_until = 'Atlas reset', now+4
+            elif key in (ord('c'), ord('C')):
+                adjustments.reset(title)
+                message, message_until = 'Contrast and sharpness reset', now+3
             elif key == 32:
                 paused = not paused
             elif key in (ord('l'), ord('L')):
@@ -585,7 +610,7 @@ def main(argv=None):
                 if video_path is not None:
                     cap.release()
                     cv2.destroyAllWindows()
-                    return run_video(args, video_path)
+                    return run_video(args, video_path, adjustments=adjustments)
             try:
                 if cv2.getWindowProperty(title, cv2.WND_PROP_VISIBLE) < 1:
                     if not args.no_autosave and not saved_once:
