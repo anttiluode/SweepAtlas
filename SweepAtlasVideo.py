@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 
 from SweepAtlas import SweepAtlas, build_display, label
+from SweepAtlasAdjust import ImageAdjustments
 
 
 WINDOW = "SweepAtlas  |  Video stitching"
@@ -93,15 +94,16 @@ def read_at(cap, frame_index, frame_count):
     return frame, frame_index
 
 
-def video_display(frame, atlas, paused, fps, name, index, total, message):
-    base = build_display(frame, atlas, paused, atlas.lost == 0, fps, "")
+def video_display(frame, atlas, paused, fps, name, index, total, message, adjustments=None):
+    base = build_display(frame, atlas, paused, atlas.lost == 0, fps, "",
+                         adjustments=adjustments)
     canvas = np.full((628, 1520, 3), (25, 26, 30), np.uint8)
     canvas[:550, :] = base
     # Replace webcam-only labels/instructions.
     cv2.rectangle(canvas, (0, 0), (310, 43), (25, 26, 30), -1)
     label(canvas, "VIDEO SOURCE", (12, 30), (80, 220, 150), .67)
     cv2.rectangle(canvas, (760, 509), (1519, 549), (25, 26, 30), -1)
-    label(canvas, "O open  SPACE play/pause  R reset atlas  S save  L relocalize  Q quit",
+    label(canvas, "O open  SPACE pause  R atlas  C reset filters  S save  L relocalize  Q quit",
           (774, 529), (195, 200, 207), .42)
     if message:
         label(canvas, message[:95], (774, 508), (110, 240, 135), .49)
@@ -119,7 +121,7 @@ def video_display(frame, atlas, paused, fps, name, index, total, message):
     return canvas
 
 
-def run_video(args, path=None):
+def run_video(args, path=None, adjustments=None):
     """Open a video player with a live atlas and interactive timeline."""
     source = Path(path) if path else choose_video()
     if source is None:
@@ -144,6 +146,9 @@ def run_video(args, path=None):
 
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WINDOW, 1520, 628)
+    if adjustments is None:
+        adjustments = ImageAdjustments()
+    adjustments.attach(WINDOW)
     paused = False
     scrubbing = False
     pending_seek = None
@@ -177,7 +182,8 @@ def run_video(args, path=None):
             return
         dest = args.out / f"SweepAtlas_{source.stem}_{datetime.now():%Y%m%d_%H%M%S}.png"
         try:
-            w, h, scale = atlas.tiles.save(dest, args.max_export_mp)
+            adjustments.read(WINDOW)
+            w, h, scale = atlas.tiles.save(dest, args.max_export_mp, adjustments=adjustments)
             print(f"SAVED {dest.resolve()} ({w}x{h}, scale {scale:.3f})", flush=True)
             message, message_until = f"Saved {dest.name} ({w}x{h})", time.monotonic() + 7
             saved_once = True
@@ -201,7 +207,7 @@ def run_video(args, path=None):
         message_until = time.monotonic() + 6
 
     print(f"VIDEO {source}  ({total} frames, {fps:.2f} fps)")
-    print("Timeline drag / , . frame step / J K 5 seconds / SPACE play / R reset / S save / O open")
+    print("Timeline drag / , . frames / J K 5 seconds / SPACE play / R atlas / C reset filters / S save / O open")
     try:
         while True:
             now = time.monotonic()
@@ -238,8 +244,10 @@ def run_video(args, path=None):
                     message, message_until = "End of video; scrub back, replay, or save", time.monotonic() + 8
 
             if time.monotonic() - last_overlay >= .08:
+                adjustments.read(WINDOW)
                 visible = message if time.monotonic() < message_until else ""
-                display = video_display(frame, atlas, paused, fps, source.name, index, total, visible)
+                display = video_display(frame, atlas, paused, fps, source.name, index, total,
+                                        visible, adjustments=adjustments)
                 cv2.imshow(WINDOW, display)
                 last_overlay = time.monotonic()
             key = cv2.waitKeyEx(15)
@@ -249,6 +257,9 @@ def run_video(args, path=None):
                 break
             if key in (ord("s"), ord("S")):
                 save()
+            elif key in (ord("c"), ord("C")):
+                adjustments.reset(WINDOW)
+                message, message_until = "Contrast and sharpness reset", time.monotonic() + 4
             elif key == 32:
                 paused = not paused
                 next_frame_at = time.monotonic() + 1. / fps
