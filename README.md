@@ -33,6 +33,21 @@ python3.13 SweepAtlasVideo.py
 
 Video playback follows the source frame rate when possible; geometry processing samples at **5 frames/second** by default (configurable with `--process-hz`). When stitching is computationally expensive playback may be slower.
 
+
+### Contrast and sharpness
+
+Both the webcam and video windows now have **two interactive OpenCV sliders underneath the image**:
+
+| Slider | Range | Default |
+|---|---:|---:|
+| **Contrast %** | 0–200% | **100%** (original contrast) |
+| **Sharpness %** | 0–200% | **0%** (no sharpening) |
+
+Move the sliders while the video plays or is paused. The left source preview and right atlas preview update together. Press **C** to restore default contrast and sharpness.
+
+**Non-destructive:** Feature matching, keyframes and tile storage still use original captured pixels. The sliders change **only the displayed image and the PNG export**. You can tune the image *after* building the atlas; it is not necessary to rebuild it. A new `S` save includes the current settings, while transparency in never-observed areas stays intact. Sharpness uses a Gaussian unsharp mask and is applied at export resolution, not merely to the on-screen thumbnail. Large exports are processed in horizontal strips to avoid a second giant image allocation.
+
+
 **Video controls**
 
 | Control | Action |
@@ -42,7 +57,8 @@ Video playback follows the source frame rate when possible; geometry processing 
 | **, / .** or **Left / Right** | Step backward/forward one frame (while paused) |
 | **J / K** | Jump backward/forward five seconds (while paused) |
 | **O** | Open another video file |
-| **S** | Save current atlas PNG |
+| **S** | Save current atlas PNG with current contrast/sharpness |
+| **C** | Reset contrast to 100% and sharpness to 0% |
 | **R** | Reset atlas, beginning a new mosaic at the current video position |
 | **L** | Try matching earlier keyframes on the next processed frame |
 | **P** | Toggle camera-motion predictor |
@@ -61,7 +77,8 @@ python3.13 SweepAtlas.py --video "C:\Videos\my_sweep.mp4" --mode homography --pr
 | Control | Action |
 |---|---|
 | **O** | Choose and open a video |
-| **S** | Save the current mosaic |
+| **S** | Save the current mosaic with current contrast/sharpness |
+| **C** | Reset contrast/sharpness |
 | **Space** | Pause or resume stitching |
 | **R** | Reset the mosaic |
 | **L** | Search earlier views to recover alignment |
@@ -90,7 +107,7 @@ Run the original synthetic alignment check:
 python3.13 SweepAtlas.py --self-test
 ```
 
-Run headless video seek/read tests from the repository root:
+Run video seek/read, image-adjustment and export tests from the repository root:
 
 ```bat
 python3.13 -m unittest discover -s tests -v
