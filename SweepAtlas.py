@@ -580,10 +580,12 @@ def main(argv=None):
                 atlas.predictor = not atlas.predictor
                 message, message_until = f'Pose predictor: {atlas.predictor}', now+3
             elif key in (ord('o'), ord('O')):
-                from SweepAtlasVideo import run_video
-                cap.release()
-                cv2.destroyAllWindows()
-                return run_video(args)
+                from SweepAtlasVideo import choose_video, run_video
+                video_path = choose_video()
+                if video_path is not None:
+                    cap.release()
+                    cv2.destroyAllWindows()
+                    return run_video(args, video_path)
             try:
                 if cv2.getWindowProperty(title, cv2.WND_PROP_VISIBLE) < 1:
                     if not args.no_autosave and not saved_once:
